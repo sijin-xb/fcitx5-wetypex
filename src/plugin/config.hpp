@@ -121,6 +121,7 @@ FCITX_CONFIGURATION(
     Option<int, IntConstrain> pageSize{this, "PageSize", "每页候选数", 5,
                                        IntConstrain(3, 9)};
     Option<bool> vertical{this, "Vertical", "候选词竖排", false};
+    Option<bool> autoSpace{this, "AutoSpace", "中英文之间自动加空格", false};
     Option<PreeditPosition> preeditPosition{
         this, "PreeditPosition", "拼音显示位置", PreeditPosition::Client};
     Option<CandidateLabelStyle> labelStyle{this, "CandidateLabelStyle",

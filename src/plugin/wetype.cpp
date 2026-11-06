@@ -255,6 +255,7 @@ struct State : InputContextProperty {
   std::vector<std::pair<std::string, std::string>> vMenuEntries;
   bool active = false;
   Key modifierCandidate;
+  char32_t lastCommitTail = 0;
   TrackableObjectReference<InputContext> ic;
   State(uint64_t n, InputContext &context) : id(n), ic(context.watch()) {}
 };
@@ -633,6 +634,100 @@ class WeType : public InputMethodEngine {
       return entry->englishHalf;
     return entry->normal;
   }
+  static bool isCjk(char32_t c) {
+    return (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF) ||
+           (c >= 0xF900 && c <= 0xFAFF) || (c >= 0x20000 && c <= 0x2FA1F);
+  }
+  static bool isAsciiWord(char32_t c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+           (c >= 'A' && c <= 'Z');
+  }
+  static bool isDigit(char32_t c) { return c >= '0' && c <= '9'; }
+  // Characters that bind to a preceding number: 100元, 第3章, 5个.
+  static bool isMeasureWord(char32_t c) {
+    switch (c) {
+    case U'个': case U'元': case U'块': case U'角': case U'分':
+    case U'章': case U'节': case U'页': case U'行': case U'条':
+    case U'年': case U'月': case U'日': case U'号': case U'点':
+    case U'时': case U'刻': case U'秒': case U'天': case U'周':
+    case U'次': case U'位': case U'名': case U'项': case U'种':
+    case U'倍': case U'度': case U'层': case U'楼': case U'室':
+    case U'米': case U'克': case U'斤': case U'升': case U'寸':
+    case U'尺': case U'码': case U'亩': case U'岁': case U'级':
+    case U'版': case U'期': case U'届': case U'场': case U'轮':
+      return true;
+    default:
+      return false;
+    }
+  }
+  static char32_t decodeOne(const std::string &text, size_t at,
+                            size_t *width) {
+    const auto *p = reinterpret_cast<const unsigned char *>(text.data()) + at;
+    const auto left = text.size() - at;
+    char32_t c = 0;
+    size_t n = 0;
+    if (p[0] < 0x80) {
+      c = p[0];
+      n = 1;
+    } else if ((p[0] & 0xE0) == 0xC0 && left >= 2) {
+      c = char32_t(p[0] & 0x1F) << 6 | (p[1] & 0x3F);
+      n = 2;
+    } else if ((p[0] & 0xF0) == 0xE0 && left >= 3) {
+      c = char32_t(p[0] & 0x0F) << 12 | char32_t(p[1] & 0x3F) << 6 |
+          (p[2] & 0x3F);
+      n = 3;
+    } else if ((p[0] & 0xF8) == 0xF0 && left >= 4) {
+      c = char32_t(p[0] & 0x07) << 18 | char32_t(p[1] & 0x3F) << 12 |
+          char32_t(p[2] & 0x3F) << 6 | (p[3] & 0x3F);
+      n = 4;
+    } else {
+      *width = 1;
+      return 0xFFFD;
+    }
+    *width = n;
+    return c;
+  }
+  std::string applyAutoSpace(const std::string &text, char32_t *tail) const {
+    if (text.empty())
+      return text;
+    std::string out;
+    out.reserve(text.size() + 8);
+    size_t i = 0, width = 0;
+    char32_t prev = *tail;
+    while (i < text.size()) {
+      const auto c = decodeOne(text, i, &width);
+      if (c == ' ') {
+        prev = c;
+        out.append(text, i, width);
+        i += width;
+        continue;
+      }
+      const bool need =
+          (prev && isCjk(prev) && isAsciiWord(c)) ||
+          (prev && isAsciiWord(prev) && isCjk(c) &&
+           !(isDigit(prev) && isMeasureWord(c)));
+      if (need)
+        out += ' ';
+      out.append(text, i, width);
+      prev = c;
+      i += width;
+    }
+    *tail = prev;
+    return out;
+  }
+  void commitAutoSpaced(InputContext *ic, State *s, const std::string &text) {
+    if (text.empty())
+      return;
+    if (*config_.appearance->autoSpace)
+      ic->commitString(applyAutoSpace(text, &s->lastCommitTail));
+    else
+      ic->commitString(text);
+    size_t at = text.size(), width = 0;
+    while (at && (static_cast<unsigned char>(text[at - 1]) & 0xC0) == 0x80)
+      --at;
+    if (at)
+      s->lastCommitTail = decodeOne(text, at - 1, &width);
+  }
   template <typename Context, typename Flag = CapabilityFlag>
   void commitStringAtCursor(Context *ic, const std::string &text,
                                    size_t cursor) {
@@ -825,6 +920,7 @@ class WeType : public InputMethodEngine {
     appearance->candidateSize.setValue(
         std::clamp(int(wire::number(j.get(), "candidate_size", 13)), 10, 18));
     appearance->vertical.setValue(vertical_);
+    appearance->autoSpace.setValue(boolSetting("auto_space", false));
     appearance->preeditPosition.setValue(
         wire::str(j.get(), "preedit_position") == "candidate"
             ? wetype_config::PreeditPosition::Candidate
@@ -973,6 +1069,7 @@ class WeType : public InputMethodEngine {
     wire::put(json.get(), "page_size", int64_t(*appearance.pageSize));
     wire::put(json.get(), "candidate_size", int64_t(*appearance.candidateSize));
     wire::put(json.get(), "vertical", bool(*appearance.vertical));
+    wire::put(json.get(), "auto_space", bool(*appearance.autoSpace));
     wire::put(json.get(), "preedit_position",
               std::string(*appearance.preeditPosition ==
                                   wetype_config::PreeditPosition::Candidate
@@ -2132,7 +2229,7 @@ class WeType : public InputMethodEngine {
       for (size_t i = 0; i < json_object_array_length(commits); i++) {
         auto *v = json_object_array_get_idx(commits, i);
         if (json_object_is_type(v, json_type_string))
-          ic->commitString(json_object_get_string(v));
+          commitAutoSpaced(ic, s, json_object_get_string(v));
       }
     auto cursorCommit = wire::str(j.get(), "cursor_commit");
     auto cursorCommitPosition =

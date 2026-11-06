@@ -868,6 +868,10 @@ int main(int argc, char **argv) {
        row("默认输入语言（中文/英文）", {}, languageSetup, 52),
        row("模糊拼音", {}, fuzzySetup, 52)}));
   input.body->addWidget(rowsCard(
+      {row("中英文之间自动加空格", "输入「我在Linux」上屏为「我在 Linux」",
+           toggle(wetype::settingBool(settings.value("auto_space"), false),
+                  true, "auto_space"))}));
+  input.body->addWidget(rowsCard(
       {row("单机模式",
            "无需网络，单机离线使用。不支持跨设备、表情推荐、问 AI 等联网功能",
            toggle(wetype::settingBool(settings.value("standalone"), false),
